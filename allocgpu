@@ -1,0 +1,83 @@
+# allocgpu - a shell script for AI research on GPU servers with conda by sheryc
+# Init
+cmd=""
+need_gpus=1
+max_wait_time=60 # In minutes
+query_interval=5 # Query every 5 minutes
+use_all=0 # Whether use all gpus available if not meeting the needs
+conda=""
+
+# Param parsing
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -g|--gpus) need_gpus=$(expr $2); shift ;;
+		-m|--max_wait_time) max_wait_time=$(expr $2); shift ;;
+		-i|--interval) query_interval=$(expr $2); shift ;;
+		-c|--conda) conda=$(expr $2); shift ;;
+		-a|--all) use_all=1 ;;
+		-h|--help) echo "GPU queueing and allocating system."; echo -e "-g\t--gpus\tNumber of gpus to be allocated."; echo -e "-m\t--max_wait_time\tMax time (in minutes) for waiting."; echo -e "-i\t--interval\tTime interval (in minutes) for retrying."; echo -e "-c\t--conda\tThe name of conda virtual env."; echo -e "-h\t--help\tPrint help message." ;;
+        *) cmd+="$1 " ;;
+    esac
+    shift
+done
+
+# Quering gpus
+gpus=$(nvidia-smi -L | cut -f1 -d: | cut -f2 -d' ')
+
+freegpu=()
+retries=0
+
+while [[ ${#freegpu[@]} -lt ${need_gpus} ]] || [[ ${#freegpu[@]} -ge 1 && ${max_wait_time} -le $((${retries} * ${query_interval})) ]]; do
+	if [[ retries -gt 0 ]]; then
+		echo "Tried ${retries} time(s). ${#freegpu[@]} gpus available. Next retry in ${query_interval} minutes."
+		freegpu=()
+		sleep "${query_interval}m"
+	fi
+	for gpu in ${gpus}; do
+		isfree=$(nvidia-smi -q -i ${gpu} -d PIDS | grep None | wc -l)
+		if [[ ${isfree} -gt 0 ]]; then
+			freegpu+=(${gpu})
+		fi
+	done
+	retries+=1
+done
+
+# Exit if timeout
+if [[ ${#freegpu[@]} -eq 0 || ${max_wait_time} -gt $((${retries} * ${query_interval})) ]]; do
+	exit 1
+fi
+
+# Allocate GPUs
+gpu_cmd="CUDA_VISIBLE_DEVICES="
+gpu_use=""
+
+if [[ ${#freegpu[@]} -ge ${need_gpus} ]]; then
+	for i in $(seq 0 $((${need_gpus}-1))); do
+		gpu_use+="${freegpu[$i]}"
+		if [[ $i -lt $((${need_gpus}-1)) ]]; then
+			gpu_use+=","
+		fi
+	done
+fi
+
+if [[ ${#freegpu[@]} -ge 1 && ${max_wait_time} -le $((${retries} * ${query_interval})) ]]; then
+	if [[ ${use_all} -eq 1 ]]; then
+		for i in "${freegpu[@]}"; do
+			gpu_use+=$i
+		done
+	else:
+		# $use_all == 0
+		gpu_use+="${freegpu[0]}"
+	fi
+fi
+
+# Execute commands
+echo "GPU allocated: ${gpu_use}"
+gpu_cmd+=${gpu_use}
+export ${gpu_cmd}
+conda activate ${conda}
+if [[ cmd = '.'* ]]; then
+    source ${cmd}
+else
+    ${cmd}
+fi
