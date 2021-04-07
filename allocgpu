@@ -1,51 +1,49 @@
-# allocgpu - a shell script for AI research on GPU servers with conda by sheryc
+#! /bin/zsh
 # Init
 cmd=""
 need_gpus=1
-max_wait_time=60 # In minutes
+max_wait_time=720 # In minutes
 query_interval=5 # Query every 5 minutes
 use_all=0 # Whether use all gpus available if not meeting the needs
+max_use=4 # Max gpu usage
 conda=""
 
 # Param parsing
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -g|--gpus) need_gpus=$(expr $2); shift ;;
-		-m|--max_wait_time) max_wait_time=$(expr $2); shift ;;
-		-i|--interval) query_interval=$(expr $2); shift ;;
+		--max_wait_time) max_wait_time=$(expr $2); shift ;;
 		-c|--conda) conda=$(expr $2); shift ;;
 		-a|--all) use_all=1 ;;
-		-h|--help) echo "GPU queueing and allocating system."; echo -e "-g\t--gpus\tNumber of gpus to be allocated."; echo -e "-m\t--max_wait_time\tMax time (in minutes) for waiting."; echo -e "-i\t--interval\tTime interval (in minutes) for retrying."; echo -e "-c\t--conda\tThe name of conda virtual env."; echo -e "-h\t--help\tPrint help message." ;;
+        -x|--max) max_use=$(expr $2); shift ;;
+		-h|--help) echo "GPU queueing and allocating system."; echo -e "-g\t--gpus\tNumber of gpus to be allocated."; echo -e "--max_wait_time\tMax time (in minutes) for waiting."; echo -e "-c\t--conda\tThe name of conda virtual env."; echo -e "-a\t--all\tWhether use all gpus available if not meeting the needs after max waiting time."; echo "-x\t--max\tMaximum gpus to use, the script will only alloc the first x gpus of the machine."; echo -e "-h\t--help\tPrint help message." ;;
         *) cmd+="$1 " ;;
     esac
     shift
 done
 
-# Quering gpus
+# Querying gpus
 gpus=$(nvidia-smi -L | cut -f1 -d: | cut -f2 -d' ')
+gpus=${gpus[@]:0:$max_use*2}
+echo ${gpus[@]}
 
 freegpu=()
 retries=0
 
 while [[ ${#freegpu[@]} -lt ${need_gpus} ]] || [[ ${#freegpu[@]} -ge 1 && ${max_wait_time} -le $((${retries} * ${query_interval})) ]]; do
 	if [[ retries -gt 0 ]]; then
-		echo "Tried ${retries} time(s). ${#freegpu[@]} gpus available. Next retry in ${query_interval} minutes."
-		freegpu=()
+		echo "Tried ${retries} time(s). ${#freegpu[@]} gpus available. Next retry at ${query_interval} minutes."
 		sleep "${query_interval}m"
 	fi
+	freegpu=()
 	for gpu in ${gpus}; do
 		isfree=$(nvidia-smi -q -i ${gpu} -d PIDS | grep None | wc -l)
 		if [[ ${isfree} -gt 0 ]]; then
 			freegpu+=(${gpu})
 		fi
 	done
-	retries+=1
+    (( retries+=1 ))
 done
-
-# Exit if timeout
-if [[ ${#freegpu[@]} -eq 0 || ${max_wait_time} -gt $((${retries} * ${query_interval})) ]]; do
-	exit 1
-fi
 
 # Allocate GPUs
 gpu_cmd="CUDA_VISIBLE_DEVICES="
@@ -71,7 +69,6 @@ if [[ ${#freegpu[@]} -ge 1 && ${max_wait_time} -le $((${retries} * ${query_inter
 	fi
 fi
 
-# Execute commands
 echo "GPU allocated: ${gpu_use}"
 gpu_cmd+=${gpu_use}
 export ${gpu_cmd}
